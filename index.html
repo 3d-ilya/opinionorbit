@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpinionOrbit — сортировка из базы</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #f0f2f5; min-height: 100vh; }
+    header { background: #0d47a1; color: white; padding: 1rem; text-align: center; position: relative; }
+    .container { display: flex; gap: 1rem; padding: 1rem; max-width: 1700px; margin: 0 auto; }
+    aside, main { background: white; border-radius: 4px; box-shadow: 0 2px 20px rgba(0,0,0,0.08); padding: 1rem; }
+    aside { width: 380px; overflow-y: auto; }
+    main { flex: 1; }
+    #status { position: fixed; top: 10px; right: 10px; padding: 6px 12px; border-radius: 4px; color: white; font-weight: 600; z-index: 1000; }
+    .card {
+      margin-bottom: 0.7rem;
+      padding: 0.9rem;
+      border-radius: 4px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+      transition: transform 0.3s, opacity 0.5s;
+      opacity: 0;
+      animation: fadeIn 0.6s forwards;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .card:hover { transform: translateY(-4px); }
+    .text {
+      margin-bottom: 0.5rem;
+      line-height: 1.4;
+      transition: font-size 0.4s ease, font-weight 0.4s ease;
+    }
+    .reactions { display: flex; gap: 3px; flex-wrap: nowrap; overflow-x: auto; padding: 4px 0; }
+    .reaction-btn {
+      display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 4px;
+      background: #f1f3f5; border: 1px solid #dee2e6; cursor: pointer; transition: all 0.15s;
+      font-size: 0.95rem; white-space: nowrap;
+    }
+    .reaction-btn:hover { background: #e9ecef; transform: scale(1.08); }
+    .reaction-btn.active {
+      background: #e3f2fd;
+      border-color: #90caf9;
+      box-shadow: 0 0 0 3px rgba(144,202,249,0.3);
+    }
+    .emoji { font-size: 1.3rem; }
+    .count { font-weight: 600; min-width: 20px; text-align: center; font-size: 0.9rem; animation: pulse 0.6s ease-out; }
+    @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.5); } 100% { transform: scale(1); } }
+    .sort-select { 
+      padding: 0.6rem; 
+      border-radius: 4px; 
+      border: 1px solid #ced4da; 
+      margin-bottom: 1rem; 
+      width: 100%; 
+      font-size: 0.95rem;
+    }
+    input, button { padding: 0.8rem; border-radius: 4px; width: 100%; margin-bottom: 0.8rem; box-sizing: border-box; }
+    button { background: #1976d2; color: white; border: none; cursor: pointer; }
+    button:hover { background: #1565c0; }
+  </style>
+</head>
+<body>
+<div id="status" style="background:#28a745;">Realtime подключён!</div>
+<header>
+  <h2>Тема: Будущее ИИ в обществе</h2>
+</header>
+<div class="container">
+  <aside>
+    <h3>Все тезисы (кроме моих и в центре)</h3>
+    <select id="left-sort" class="sort-select" onchange="updateLeftSort()">
+      <option value="loading">Загрузка сортировок...</option>
+    </select>
+    <div id="left-list"></div>
+  </aside>
+
+  <main id="center-board">
+    <h3>Центральная панель (топ-реакции)</h3>
+    <div id="center-content"></div>
+  </main>
+
+  <aside>
+    <h3>Мои тезисы</h3>
+    <select id="right-sort" class="sort-select" onchange="updateRightSort()">
+      <option value="loading">Загрузка сортировок...</option>
+    </select>
+    <input id="new-input" placeholder="Новый тезис...">
+    <button onclick="addThesis()">Отправить</button>
+    <div id="my-theses"></div>
+  </aside>
+</div>
+
+<script>
+// Supabase
+const SUPABASE_URL = 'https://lhdayvfykjvgfhwhsixz.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_d6BZCtGvL9ukuGAa9PCHGQ_wAkfUhJb';
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// Токен пользователя
+const userToken = localStorage.getItem('user_token') || crypto.randomUUID();
+localStorage.setItem('user_token', userToken);
+
+// Порог переноса (загружаем из settings)
+let TRANSFER_THRESHOLD = 3;
+async function loadThreshold() {
+  const { data } = await sb.from('settings').select('value').eq('key', 'top_count').single();
+  if (data) TRANSFER_THRESHOLD = data.value;
+  console.log("Порог переноса:", TRANSFER_THRESHOLD);
+}
+
+// Реакции
+const reactions = [
+  { value: -2, emoji: '😡', label: 'отстой', color: '#c62828', countField: 'count_minus2' },
+  { value: -1, emoji: '😒', label: 'ерунда', color: '#ef5350', countField: 'count_minus1' },
+  { value: 0, emoji: '🤔', label: 'непонятно', color: '#757575', countField: 'count_zero' },
+  { value: 1, emoji: '👍', label: 'интересно', color: '#66bb6a', countField: 'count_plus1' },
+  { value: 2, emoji: '🔥', label: 'сто пудово!', color: '#2e7d32', countField: 'count_plus2' }
+];
+
+// Добавление нового тезиса (только в мои тезисы)
+async function addThesis() {
+  const text = document.getElementById('new-input').value.trim();
+  if (!text) return;
+
+  const { error } = await sb.from('theses').insert({
+    text,
+    user_token: userToken,
+    score: 0,
+    count_minus2: 0,
+    count_minus1: 0,
+    count_zero: 0,
+    count_plus1: 0,
+    count_plus2: 0,
+    is_central: false
+  });
+
+  if (error) {
+    alert('Ошибка добавления: ' + error.message);
+  } else {
+    document.getElementById('new-input').value = '';
+    loadMyTheses();
+  }
+}
+
+// Голосование — только последнее мнение пользователя
+async function vote(thesisId, value) {
+  await sb.from('votes')
+    .delete()
+    .eq('thesis_id', thesisId)
+    .eq('user_token', userToken);
+
+  const { error } = await sb.from('votes').insert({
+    thesis_id: thesisId,
+    user_token: userToken,
+    value: value
+  });
+
+  if (error) {
+    alert('Не удалось проголосовать');
+    return;
+  }
+
+  await recalculateThesis(thesisId);
+  await checkAndTransferToCenter(thesisId);
+
+  const reactionsDiv = document.querySelector(`.reactions[data-thesis-id="${thesisId}"]`);
+  if (reactionsDiv) {
+    reactionsDiv.querySelectorAll('.reaction-btn').forEach(btn => btn.classList.remove('active'));
+    const activeBtn = reactionsDiv.querySelector(`[data-value="${value}"]`);
+    if (activeBtn) activeBtn.classList.add('active');
+  }
+
+  loadAllTheses();
+  loadMyTheses();
+  loadCenter();
+}
+
+// Пересчёт счётчиков и score
+async function recalculateThesis(thesisId) {
+  const { data: votes } = await sb.from('votes').select('value').eq('thesis_id', thesisId);
+  const counts = { count_minus2: 0, count_minus1: 0, count_zero: 0, count_plus1: 0, count_plus2: 0 };
+  let sum = 0;
+
+  votes.forEach(v => {
+    sum += v.value;
+    if (v.value === -2) counts.count_minus2++;
+    if (v.value === -1) counts.count_minus1++;
+    if (v.value === 0) counts.count_zero++;
+    if (v.value === 1) counts.count_plus1++;
+    if (v.value === 2) counts.count_plus2++;
+  });
+
+  const averageScore = votes.length ? sum / votes.length : 0;
+
+  const { error } = await sb.from('theses').update({
+    score: averageScore,
+    ...counts
+  }).eq('id', thesisId);
+
+  if (error) console.error("Ошибка пересчёта:", error.message);
+  else console.log("Счётчики обновлены!");
+}
+
+// Проверка и перенос в центр
+async function checkAndTransferToCenter(thesisId) {
+  const { data: thesis } = await sb.from('theses').select('*').eq('id', thesisId).single();
+  if (!thesis || thesis.is_central) return;
+
+  let shouldTransfer = false;
+  for (const r of reactions) {
+    if (thesis[r.countField] >= TRANSFER_THRESHOLD) {
+      shouldTransfer = true;
+      break;
+    }
+  }
+
+  if (shouldTransfer) {
+    console.log("Перенос в центр! Реакция ≥", TRANSFER_THRESHOLD);
+    await sb.from('theses').update({ is_central: true }).eq('id', thesisId);
+    loadAllTheses();
+    loadMyTheses();
+    loadCenter();
+  }
+}
+
+// Загрузка всех тезисов (левая панель — кроме моих и уже в центре)
+async function loadAllTheses() {
+  const sort = localStorage.getItem('left_sort') || 'created_at_desc';
+
+  const { data: sortOpt } = await sb.from('sort_options').select('order_by, order_dir').eq('sort_key', sort).single();
+  const orderBy = sortOpt ? sortOpt.order_by : 'created_at';
+  const orderDir = sortOpt ? sortOpt.order_dir : 'desc';
+
+  const { data } = await sb.from('theses')
+    .select('*')
+    .neq('user_token', userToken)
+    .eq('is_central', false)
+    .order(orderBy, { ascending: orderDir === 'asc' });
+
+  const container = document.getElementById('left-list');
+  container.innerHTML = '';
+
+  data.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.thesisId = item.id;
+    card.style.background = getColorByScore(item.score || 0);
+    card.innerHTML = `
+      <div class="text">${item.text}</div>
+      <div class="reactions" data-thesis-id="${item.id}">
+        ${reactions.map(r => `
+          <div class="reaction-btn" data-value="${r.value}" onclick="vote('${item.id}', ${r.value})">
+            <span class="emoji">${r.emoji}</span>
+            <span class="count">${item[r.countField] || 0}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+// Загрузка центральной панели (только перенесённые тезисы)
+async function loadCenter() {
+  const { data } = await sb.from('theses')
+    .select('*')
+    .eq('is_central', true)
+    .order('score', { ascending: false });
+
+  const container = document.getElementById('center-content');
+  container.innerHTML = '';
+
+  data.forEach(item => {
+    const totalVotes = (item.count_minus2 || 0) + (item.count_minus1 || 0) + (item.count_zero || 0) + (item.count_plus1 || 0) + (item.count_plus2 || 0);
+    const fontSize = 1.1 + (totalVotes * 0.05) + 'rem';
+    const fontWeight = 400 + (totalVotes * 40);
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.thesisId = item.id;
+    card.style.background = getColorByScore(item.score || 0);
+    card.innerHTML = `
+      <div class="text" style="font-size: ${fontSize}; font-weight: ${fontWeight};">${item.text}</div>
+      <div class="reactions" data-thesis-id="${item.id}">
+        ${reactions.map(r => `
+          <div class="reaction-btn" data-value="${r.value}" onclick="vote('${item.id}', ${r.value})">
+            <span class="emoji">${r.emoji}</span>
+            <span class="count">${item[r.countField] || 0}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+// Загрузка моих тезисов (правая панель — только мои)
+async function loadMyTheses() {
+  const sort = localStorage.getItem('right_sort') || 'created_at_desc';
+
+  const { data: sortOpt } = await sb.from('sort_options').select('order_by, order_dir').eq('sort_key', sort).single();
+  const orderBy = sortOpt ? sortOpt.order_by : 'created_at';
+  const orderDir = sortOpt ? sortOpt.order_dir : 'desc';
+
+  const { data, error } = await sb.from('theses')
+    .select('*')
+    .eq('user_token', userToken)
+    .order(orderBy, { ascending: orderDir === 'asc' });
+
+  const container = document.getElementById('my-theses');
+  if (!container) return console.error("Элемент my-theses не найден");
+  if (error) return console.error("Ошибка моих тезисов:", error);
+
+  container.innerHTML = '';
+
+  data.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.thesisId = item.id;
+    card.style.background = getColorByScore(item.score || 0);
+    card.innerHTML = `
+      <div class="text">${item.text}</div>
+      <div class="reactions" data-thesis-id="${item.id}">
+        ${reactions.map(r => `
+          <div class="reaction-btn" data-value="${r.value}" onclick="vote('${item.id}', ${r.value})">
+            <span class="emoji">${r.emoji}</span>
+            <span class="count">${item[r.countField] || 0}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+// Цвет по score
+function getColorByScore(score) {
+  if (score <= -1.5) return reactions[0].color;
+  if (score <= -0.5) return reactions[1].color;
+  if (score < 0.5) return reactions[2].color;
+  if (score < 1.5) return reactions[3].color;
+  return reactions[4].color;
+}
+
+// Сохранение сортировки
+document.getElementById('left-sort').addEventListener('change', (e) => {
+  localStorage.setItem('left_sort', e.target.value);
+  loadAllTheses();
+});
+
+document.getElementById('right-sort').addEventListener('change', (e) => {
+  localStorage.setItem('right_sort', e.target.value);
+  loadMyTheses();
+});
+
+// Live-подписка на votes
+sb.channel('votes-live')
+  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, (payload) => {
+    loadAllTheses();
+    loadMyTheses();
+    loadCenter();
+  })
+  .subscribe();
+
+// Загрузка вариантов сортировки из таблицы sort_options
+async function loadSortOptions() {
+  const { data, error } = await sb.from('sort_options').select('*').order('id');
+  if (error) {
+    console.error("Ошибка загрузки сортировок:", error);
+    return;
+  }
+
+  const leftSelect = document.getElementById('left-sort');
+  const rightSelect = document.getElementById('right-sort');
+  leftSelect.innerHTML = '';
+  rightSelect.innerHTML = '';
+
+  data.forEach(opt => {
+    const option = document.createElement('option');
+    option.value = opt.sort_key;
+    option.textContent = opt.display_name;
+    option.title = opt.description || '';
+
+    leftSelect.appendChild(option.cloneNode(true));
+    rightSelect.appendChild(option);
+  });
+
+  // Восстанавливаем сохранённые значения
+  const leftSort = localStorage.getItem('left_sort') || 'created_at_desc';
+  const rightSort = localStorage.getItem('right_sort') || 'created_at_desc';
+  leftSelect.value = leftSort;
+  rightSelect.value = rightSort;
+}
+
+// Запуск
+loadThreshold().then(() => {
+  loadSortOptions().then(() => {
+    loadAllTheses();
+    loadMyTheses();
+    loadCenter();
+  });
+});
+document.getElementById('status').innerText = 'Realtime подключён!';
+document.getElementById('status').style.background = '#28a745';
+</script>
+</body>
+</html>
