@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="googlebot" content="noindex">
+  <title>OpinionOrbit — дискуссии в реальном времени</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #f0f2f5; min-height: 100vh; }
+    header { background: #0d47a1; color: white; padding: 1rem; text-align: center; }
+    .container { display: flex; gap: 1rem; padding: 1rem; max-width: 1700px; margin: 0 auto; }
+    aside, main { background: white; border-radius: 6px; box-shadow: 0 2px 20px rgba(0,0,0,0.08); padding: 1rem; }
+    aside { width: 420px; overflow-y: auto; }
+    main { flex: 1; }
+    #status { position: fixed; top: 10px; right: 10px; padding: 6px 12px; border-radius: 10px; color: white; font-weight: 600; z-index: 1000; }
+    .card {
+      margin-bottom: 1rem;
+      padding: 1.2rem;
+      border-radius: 16px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+      transition: transform 0.3s, opacity 0.5s;
+      opacity: 0;
+      animation: fadeIn 0.6s forwards;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .card:hover { transform: translateY(-4px); }
+    .text {
+      margin-bottom: 0.8rem;
+      line-height: 1.4;
+      transition: font-size 0.4s ease, font-weight 0.4s ease;
+    }
+    .reactions { display: flex; gap: 4px; flex-wrap: nowrap; overflow-x: auto; padding: 4px 0; }
+    .reaction-btn {
+      display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 20px;
+      background: #f1f3f5; border: 1px solid #dee2e6; cursor: pointer; transition: all 0.15s;
+      font-size: 0.95rem; white-space: nowrap;
+    }
+    .reaction-btn:hover { background: #e9ecef; transform: scale(1.08); }
+    .reaction-btn.active {
+      background: #e3f2fd;
+      border-color: #90caf9;
+      box-shadow: 0 0 0 3px rgba(144,202,249,0.3);
+    }
+    .emoji { font-size: 1.3rem; }
+    .count { font-weight: 600; min-width: 20px; text-align: center; font-size: 0.9rem; animation: pulse 0.6s ease-out; }
+    @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.5); } 100% { transform: scale(1); } }
+    input, button { padding: 0.8rem; border-radius: 10px; width: 100%; margin-bottom: 0.8rem; box-sizing: border-box; }
+    button { background: #1976d2; color: white; border: none; cursor: pointer; }
+    button:hover { background: #1565c0; }
+    #3d-viz { height: 600px; margin-top: 20px; border: 1px solid #ddd; border-radius: 8px; background: white; }
+  </style>
+</head>
+<body>
+
+<div id="status" style="background:#28a745;">Realtime подключён!</div>
+
+<header>
+  <h2>выступающий Темаи тезис или пункт выступления</h2>
+</header>
+
+<div class="container">
+  <aside>
+    <h3>Все тезисы (кроме моих и в центре)</h3>
+    <div id="left-list"></div>
+  </aside>
+
+  <main id="center-board">
+    <h3>Центральная панель (топ-реакции)</h3>
+    <div id="center-content"></div>
+    <h3>3D-визуализация голосования</h3>
+    <div id="3d-viz">Загрузка визуализации...</div>
+  </main>
+
+  <aside>
+    <h3>Мои тезисы</h3>
+    <input id="new-input" placeholder="Новый тезис...">
+    <button onclick="addThesis()">Отправить</button>
+    <div id="my-theses"></div>
+  </aside>
+</div>
+
+<script>
+// Supabase
+const SUPABASE_URL = 'https://lhdayvfykjvgfhwhsixz.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_d6BZCtGvL9ukuGAa9PCHGQ_wAkfUhJb';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// Токен пользователя
+const userToken = localStorage.getItem('user_token') || crypto.randomUUID();
+localStorage.setItem('user_token', userToken);
+
+// Порог переноса
+let TRANSFER_THRESHOLD = 3;
+async function loadThreshold() {
+  const { data } = await sb.from('settings').select('value').eq('key', 'top_count').single();
+  if (data) TRANSFER_THRESHOLD = data.value;
+}
+
+// Реакции
+const reactions = [
+  { value: -2, emoji: '😡', color: '#c62828', countField: 'count_minus2' },
+  { value: -1, emoji: '😒', color: '#ef5350', countField: 'count_minus1' },
+  { value: 0, emoji: '🤔', color: '#757575', countField: 'count_zero' },
+  { value: 1, emoji: '👍', color: '#66bb6a', countField: 'count_plus1' },
+  { value: 2, emoji: '🔥', color: '#2e7d32', countField: 'count_plus2' }
+];
+
+// Добавление тезиса
+async function addThesis() {
+  const text = document.getElementById('new-input').value.trim();
+  if (!text) return;
+  const { error } = await sb.from('theses').insert({
+    text,
+    user_token: userToken,
+    score: 0,
+    count_minus2: 0,
+    count_minus1: 0,
+    count_zero: 0,
+    count_plus1: 0,
+    count_plus2: 0,
+    is_central: false
+  });
+  if (error) alert('Ошибка: ' + error.message);
+  else {
+    document.getElementById('new-input').value = '';
+    loadMyTheses();
+  }
+}
+
+// Голосование
+async function vote(thesisId, value) {
+  await sb.from('votes').delete().eq('thesis_id', thesisId).eq('user_token', userToken);
+  const { error } = await sb.from('votes').insert({ thesis_id: thesisId, user_token: userToken, value });
+  if (error) return alert('Ошибка голосования');
+  await recalculateThesis(thesisId);
+  await checkAndTransferToCenter(thesisId);
+  const reactionsDiv = document.querySelector(`.reactions[data-thesis-id="${thesisId}"]`);
+  if (reactionsDiv) {
+    reactionsDiv.querySelectorAll('.reaction-btn').forEach(b => b.classList.remove('active'));
+    reactionsDiv.querySelector(`[data-value="${value}"]`)?.classList.add('active');
+  }
+  loadAllTheses();
+  loadMyTheses();
+  loadCenter();
+}
+
+// Пересчёт
+async function recalculateThesis(id) {
+  const { data: votes } = await sb.from('votes').select('value').eq('thesis_id', id);
+  const counts = { count_minus2:0, count_minus1:0, count_zero:0, count_plus1:0, count_plus2:0 };
+  let sum = 0;
+  votes.forEach(v => {
+    sum += v.value;
+    if (v.value === -2) counts.count_minus2++;
+    if (v.value === -1) counts.count_minus1++;
+    if (v.value === 0) counts.count_zero++;
+    if (v.value === 1) counts.count_plus1++;
+    if (v.value === 2) counts.count_plus2++;
+  });
+  const score = votes.length ? sum / votes.length : 0;
+  await sb.from('theses').update({ score, ...counts }).eq('id', id);
+}
+
+// Перенос в центр
+async function checkAndTransferToCenter(id) {
+  const { data: t } = await sb.from('theses').select('*').eq('id', id).single();
+  if (!t || t.is_central) return;
+  let transfer = false;
+  for (const r of reactions) {
+    if ((t[r.countField] || 0) >= TRANSFER_THRESHOLD) { transfer = true; break; }
+  }
+  if (transfer) {
+    await sb.from('theses').update({ is_central: true }).eq('id', id);
+    loadAllTheses(); loadMyTheses(); loadCenter();
+  }
+}
+
+// Загрузка левой панели
+async function loadAllTheses() {
+  const { data } = await sb.from('theses')
+    .select('*')
+    .neq('user_token', userToken)
+    .eq('is_central', false)
+    .order('created_at', { ascending: false });
+  const c = document.getElementById('left-list');
+  c.innerHTML = '';
+  data?.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="text">${item.text}</div>
+      <div>Score: <b>${Math.round(item.score*10)/10 || 0}</b></div>
+      <div class="reactions" data-thesis-id="${item.id}">
+        ${reactions.map(r => `
+          <div class="reaction-btn" data-value="${r.value}" onclick="vote('${item.id}', ${r.value})">
+            <span class="emoji">${r.emoji}</span>
+            <span class="count">${item[r.countField] || 0}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    card.style.background = getColorByScore(item.score || 0);
+    c.appendChild(card);
+  });
+}
+
+// Загрузка центра + 3D
+async function loadCenter() {
+  const { data } = await sb.from('theses')
+    .select('*')
+    .eq('is_central', true)
+    .order('score', { ascending: false });
+  const c = document.getElementById('center-content');
+  c.innerHTML = '';
+  data?.forEach(item => {
+    const total = (item.count_minus2||0)+(item.count_minus1||0)+(item.count_zero||0)+(item.count_plus1||0)+(item.count_plus2||0);
+    const fs = 1.1 + total * 0.05 + 'rem';
+    const fw = 400 + total * 40;
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="text" style="font-size:${fs}; font-weight:${fw};">${item.text}</div>
+      <div>Score: <b>${Math.round(item.score*10)/10 || 0}</b></div>
+      <div class="reactions" data-thesis-id="${item.id}">
+        ${reactions.map(r => `
+          <div class="reaction-btn" data-value="${r.value}" onclick="vote('${item.id}', ${r.value})">
+            <span class="emoji">${r.emoji}</span>
+            <span class="count">${item[r.countField] || 0}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    card.style.background = getColorByScore(item.score || 0);
+    c.appendChild(card);
+  });
+  render3DViz(); // ← вызов 3D после загрузки центра
+}
+
+// Мои тезисы
+async function loadMyTheses() {
+  const c = document.getElementById('my-theses');
+  const { data } = await sb.from('theses').select('*').eq('user_token', userToken);
+  c.innerHTML = '';
+  data?.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="text">${item.text}</div>
+      <div>Score: <b>${Math.round(item.score*10)/10 || 0}</b></div>
+      <div class="reactions" data-thesis-id="${item.id}">
+        ${reactions.map(r => `
+          <div class="reaction-btn" data-value="${r.value}" onclick="vote('${item.id}', ${r.value})">
+            <span class="emoji">${r.emoji}</span>
+            <span class="count">${item[r.countField] || 0}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    card.style.background = getColorByScore(item.score || 0);
+    c.appendChild(card);
+  });
+}
+
+// 3D-визуализация — видна даже при 1 голосе
+async function render3DViz() {
+  const { data: theses } = await sb.from('theses')
+    .select('*')
+    .eq('is_central', true)
+    .order('created_at', { ascending: true });
+
+  if (!theses?.length) {
+    document.getElementById('3d-viz').innerHTML = '<p style="text-align:center; color:gray;">Нет тезисов в центре</p>';
+    return;
+  }
+
+  let traces = [];
+
+  theses.forEach((t, idx) => {
+    const z = idx + 1;
+    const total = (t.count_minus2||0) + (t.count_minus1||0) + (t.count_zero||0) + (t.count_plus1||0) + (t.count_plus2||0);
+    const size = Math.max(12, total * 4 + 12); // минимум 12, растёт с голосами
+
+    traces.push({
+      x: [-2,-1,0,1,2],
+      y: [t.count_minus2||0, t.count_minus1||0, t.count_zero||0, t.count_plus1||0, t.count_plus2||0],
+      z: [z,z,z,z,z],
+      mode: 'markers+text',
+      type: 'scatter3d',
+      name: t.text.slice(0,20) + (t.text.length>20?'...':''),
+      marker: {
+        size: size,
+        color: [t.score||0, t.score||0, t.score||0, t.score||0, t.score||0],
+        colorscale: 'RdYlGn',
+        showscale: true,
+        line: {color:'black', width:1}
+      },
+      text: ['-2','-1','0','+1','+2'],
+      textposition: 'top center',
+      hoverinfo: 'text+name+y+z'
+    });
+  });
+
+  const layout = {
+    title: '3D-реакции по тезисам',
+    scene: {
+      xaxis: {title: 'Реакция (-2..+2)', range:[-2.5,2.5]},
+      yaxis: {title: 'Количество'},
+      zaxis: {title: '№ тезиса'},
+      aspectmode: 'manual',
+      aspectratio: {x:1, y:1.5, z:1.2}
+    },
+    height: 600,
+    margin: {l:0,r:0,b:0,t:60},
+    showlegend: true,
+    hovermode: 'closest'
+  };
+
+  Plotly.newPlot('3d-viz', traces, layout, {responsive:true});
+}
+
+// Цвет карточки
+function getColorByScore(s) {
+  if (s <= -1.5) return '#c62828';
+  if (s <= -0.5) return '#ef5350';
+  if (s < 0.5) return '#757575';
+  if (s < 1.5) return '#66bb6a';
+  return '#2e7d32';
+}
+
+// Live
+sb.channel('votes-live')
+  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, () => {
+    loadAllTheses();
+    loadMyTheses();
+    loadCenter();
+  })
+  .subscribe();
+
+// Старт
+loadThreshold().then(() => {
+  loadAllTheses();
+  loadMyTheses();
+  loadCenter();
+});
+document.getElementById('status').innerText = 'Realtime подключён!';
+document.getElementById('status').style.background = '#28a745';
+</script>
+</body>
+</html>
